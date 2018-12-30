@@ -1,9 +1,14 @@
 from functools import partial
+
 from keras import backend as K
 from keras.layers import Layer
 from operator import truediv
+from keras.callbacks import Callback
+import numpy as np
+from sklearn.metrics import precision_recall_fscore_support
 
 CLASS_NUM = 28
+GAP = K.constant(0.25, dtype="float32")
 
 
 def normalize(y):
@@ -36,7 +41,7 @@ class TruePositive(MetricsLayer):
     def __call__(self, y_true, y_pred):
         y_true = normalize(y_true)
         y_pred = normalize(y_pred)
-        tp = K.sum(y_true[:, self.label] * y_pred[:, self.label])
+        tp = K.sum(y_true[:, self.label] * y_pred[:, self.label], axis=-1)
         current_tp = self.tp * 1
 
         tp_update = K.update_add(self.tp, tp)
@@ -67,7 +72,7 @@ class TrueNegative(MetricsLayer):
         neg_y_true = 1 - y_true[:, self.label]
         neg_y_pred = 1 - y_pred[:, self.label]
 
-        tn = K.sum(neg_y_true * neg_y_pred)
+        tn = K.sum(neg_y_true * neg_y_pred, axis=-1)
         current_tn = self.tn * 1
 
         tn_update = K.update_add(self.tn, tn)
@@ -96,7 +101,7 @@ class FalseNegative(MetricsLayer):
         y_pred = normalize(y_pred)
         neg_y_pred = 1 - y_pred[:, self.label]
 
-        fn = K.sum(y_true[:, self.label] * neg_y_pred)
+        fn = K.sum(y_true[:, self.label] * neg_y_pred, axis=-1)
         current_fn = self.fn * 1
 
         fn_update = K.update_add(self.fn, fn)
@@ -125,7 +130,7 @@ class FalsePositive(MetricsLayer):
         y_pred = normalize(y_pred)
         neg_y_true = 1 - y_true[:, self.label]
 
-        fp = K.sum(neg_y_true * y_pred[:, self.label])
+        fp = K.sum(neg_y_true * y_pred[:, self.label], axis=-1)
         current_fp = self.fp * 1
 
         fp_update = K.update_add(self.fp, fp)
@@ -226,4 +231,48 @@ class MacroF1Score(MetricsLayer):
         self.add_update(self.precision.updates)
         self.add_update(self.recall.updates)
 
-        return 2 * truediv(pr * rec, pr + rec + K.epsilon())
+        return 2 * truediv(pr * rec, pr + rec + self.epsilon)
+
+
+def true_positives(y_true, y_pred):
+    return K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+
+
+def possible_positives(y_true, y_pred):
+    return K.sum(K.round(K.clip(y_true, 0, 1)))
+
+
+def predicted_positives(y_true, y_pred):
+    return K.sum(K.round(K.clip(y_pred, 0, 1)))
+
+
+class F1Callback(Callback):
+    def __init__(self):
+        super(F1Callback, self).__init__()
+        self.f1s = []
+        self.val_f1 = 0.0
+
+    def on_epoch_end(self, epoch, logs=None):
+        eps = np.finfo(np.float32).eps
+        recall = logs["val_true_positives"] / (logs["val_possible_positives"] + eps)
+        precision = logs["val_true_positives"] / (logs["val_predicted_positives"] + eps)
+        self.val_f1 = 2 * precision * recall / (precision + recall + eps)
+        print("f1_val (from log) =", self.val_f1)
+        self.f1s.append(self.val_f1)
+
+
+class F1Metrics(Callback):
+    def on_train_begin(self, logs=None):
+        self.val_f1s = []
+        self.val_recalls = []
+        self.val_precisions = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        val_predict = (np.asarray(self.model.predict(self.model.validation_data[0]))).round()
+        val_targ = self.model.validation_data[1]
+        val_precision, val_recall, val_f1, support = precision_recall_fscore_support(val_targ, val_predict, average='macro')
+        self.val_f1 = val_f1
+        self.val_f1s.append(val_f1)
+        self.val_recalls.append(val_recall)
+        self.val_precisions.append(val_precision)
+        print(f" — val_f1:{val_f1} - val_precision:{val_precision} — val_recall:{val_recall}")
