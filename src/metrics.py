@@ -9,10 +9,13 @@ from sklearn.metrics import precision_recall_fscore_support
 
 CLASS_NUM = 28
 GAP = K.constant(0.25, dtype="float32")
+THRESHOLD = 0.05
 
 
 def normalize(y):
-    return K.cast(K.round(y), 'int32')
+
+    return K.cast(K.greater(K.clip(y, 0, 1), THRESHOLD), 'int32')
+    # return K.cast(K.round(y), 'int32')
 
 
 class MetricsLayer(Layer):
@@ -262,17 +265,12 @@ class F1Callback(Callback):
 
 
 class F1Metrics(Callback):
+    def __init__(self):
+        super(F1Metrics, self).__init__()
+        self.f1_macro = MacroF1Score()
+
     def on_train_begin(self, logs=None):
-        self.val_f1s = []
-        self.val_recalls = []
-        self.val_precisions = []
+        self.f1_macro.reset_states()
 
     def on_epoch_end(self, epoch, logs=None):
-        val_predict = (np.asarray(self.model.predict(self.model.validation_data[0]))).round()
-        val_targ = self.model.validation_data[1]
-        val_precision, val_recall, val_f1, support = precision_recall_fscore_support(val_targ, val_predict, average='macro')
-        self.val_f1 = val_f1
-        self.val_f1s.append(val_f1)
-        self.val_recalls.append(val_recall)
-        self.val_precisions.append(val_precision)
-        print(f" — val_f1:{val_f1} - val_precision:{val_precision} — val_recall:{val_recall}")
+        pass

@@ -6,15 +6,15 @@ from pathlib import Path
 import csv
 from enum import Enum
 
-from sklearn.preprocessing import OneHotEncoder
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
+from iterstrat.ml_stratifiers import RepeatedMultilabelStratifiedKFold
+from skmultilearn import model_selection
+from keras.callbacks import Callback
 
-# import mpl_toolkits # import before pathlib
 
-# sys.path.append(pathlib.Path(__file__).parent)
+RANDOM_NUM = 77777
 IMAGE_BASE_DIR = '../hpaic/input/'
 COLORS = ['red', 'green', 'blue', 'yellow', ]
 TRAIN_COLOR_NUM = 3
@@ -24,15 +24,15 @@ TRAIN_DIRS = [f"{IMAGE_BASE_DIR}/train", ]
 TRAIN_ANSWER_FILES = ['train.csv', ]
 TEST_DIR = IMAGE_BASE_DIR + 'test'
 # dataset ratio
-TRAIN_RATIO = 0.90
+TRAIN_RATIO = 0.95
 VALIDATE_RATIO = 0.05
 TEST_RATIO = 0.05
 
 CLASS_NUM = 28
 IMAGE_SIZE = 512
 HOT_ENCODE_MAP = pd.get_dummies(pd.Series(list(range(CLASS_NUM)))).as_matrix()
-VOID = [0 for _ in range(CLASS_NUM)]
 IMAGE_MINMAX_MAP = {}
+BATCH_SIZE = 20
 
 
 class DataType(Enum):
@@ -41,7 +41,47 @@ class DataType(Enum):
     test = 3
 
 
-class Dataset:
+class Dataset(Callback):
+    def __init__(self, data_list: np.array, y_list: np.array):
+        super(Dataset, self).__init__()
+        self.data_list = data_list
+        self.y_list = y_list
+        self.train_index_list = np.array([])
+        self.validate_index_list = np.array([])
+        self.train_counter = 0
+        self.validate_counter = 0
+        rmskf = RepeatedMultilabelStratifiedKFold(n_splits=10, n_repeats=100, random_state=RANDOM_NUM)
+        self.index_generator = rmskf.split(self.data_list, self.y_list)
+
+    def on_train_begin(self, logs=None):
+        train_index, validate_index = next(self.index_generator)
+        self.train_index_list = train_index
+        self.validate_index_list = validate_index
+        self.train_counter = 0
+        self.validate_counter = 0
+        print(f"reset dataset. train_dataset:{len(train_index)} validate_dataset:{len(validate_index)}")
+
+    def on_epoch_end(self, epoch, logs=None):
+        pass
+
+    def increment_train(self):
+        self.train_counter = (self.train_counter + 1) % len(self.train_index_list)
+
+    def increment_validate(self):
+        self.validate_counter = (self.validate_counter + 1) % len(self.validate_index_list)
+
+    def next_train_data(self):
+        index = self.train_index_list[self.train_counter]
+        self.increment_train()
+        return self.data_list[index]
+
+    def next_validate_data(self):
+        index = self.validate_index_list[self.validate_counter]
+        self.increment_validate()
+        return self.data_list[index]
+
+
+class TestDataset:
     def __init__(self, data_list: list):
         self.data_list = data_list
 
@@ -55,6 +95,8 @@ class DataUnit:
 
 def load_raw_data():
     data_list = []
+
+    y_list = []
     for idx, train_answer_file in enumerate(TRAIN_ANSWER_FILES):
         source_dir = TRAIN_DIRS[idx]
         with open(train_answer_file, 'r') as f:
@@ -67,19 +109,16 @@ def load_raw_data():
                     continue
                 uuid = row[0]
                 answers = []
-                encoded_answers = []
                 for answer in row[1].split():
                     answers.append(int(answer.strip()))
-                for i in range(CLASS_NUM):
-                    if i in answers:
-                        encoded_answers.append(1)
-                    else:
-                        encoded_answers.append(0)
-                data_list.append(DataUnit(uuid, np.array(encoded_answers), source_dir))
-    np.random.shuffle(data_list)
-    y_true = [data.answers for data in data_list]
+                y = np.zeros(CLASS_NUM)
+                for answer in answers:
+                    y[answer] = 1
+                data_unit = DataUnit(uuid, y, source_dir)
+                data_list.append(data_unit)
+                y_list.append(y)
 
-    return Dataset(data_list), np.array(y_true)
+    return Dataset(np.array(data_list), np.array(y_list))
 
 
 def load_test_data():
@@ -91,49 +130,35 @@ def load_test_data():
         uuids.add(image_file[:uuid_len])
     for uuid in sorted(list(uuids)):
         data_list.append(DataUnit(uuid, None, TRAIN_DIRS[0]))
-    return Dataset(data_list)
+    return TestDataset(data_list)
 
 
 def create_xy(dataset: Dataset, datatype: DataType):
-    sample_num = len(dataset.data_list)
-    train_num = int(sample_num * TRAIN_RATIO)
-    validate_num = int(sample_num * VALIDATE_RATIO)
-    test_num = int(sample_num * VALIDATE_RATIO)
     while True:
         if datatype == DataType.train:
-            random_index = np.random.randint(train_num)
+            data_unit = dataset.next_train_data()
         elif datatype == DataType.validate:
-            random_index = train_num + np.random.randint(validate_num)
+            data_unit = dataset.next_validate_data()
         else:
-            random_index = train_num + validate_num + np.random.randint(test_num)
-        data_unit = dataset.data_list[random_index]
+            raise RuntimeError(f"invalid data type. type={datatype}")
         file_path = Path(data_unit.source_dir, f"{data_unit.uuid}_yellow.png")
         if file_path.exists():
             break
+        else:
+            print(f"image does not exists. path={str(file_path)}")
 
     x = []
     for color in COLORS:
         file_name = f"{data_unit.uuid}_{color}.png"
         file_path = Path(data_unit.source_dir, file_name)
         img = Image.open(str(file_path))
-        img = img.resize((IMAGE_SIZE // 2, IMAGE_SIZE // 2), Image.LANCZOS)
-        # img = img.resize((299, 299), Image.LANCZOS)
+        # img = img.resize((IMAGE_SIZE // 2, IMAGE_SIZE // 2), Image.LANCZOS)
+        img = img.resize((192, 192), Image.LANCZOS)
         img.convert('L')
         img = np.array(img)
-        # if file_name in IMAGE_MINMAX_MAP:
-        #     min_val, max_val = IMAGE_MINMAX_MAP[file_name]
-        # else:
-        #     min_val, max_val = float(img.min()), float(img.max())
-        #     IMAGE_MINMAX_MAP[file_name] = (min_val, max_val)
-        # if max_val > min_val + np.finfo(float).eps:
-        #     normalized = (img - min_val) / (max_val - min_val)
-        # else:
-        #     normalized = img
         x.append(img)
 
     # merge and normalize
-    # x = [x[0] / 2.0 + x[1] / 2.0, x[2] / 2.0 + x[1] / 2.0, x[3] / 2.0 + x[1] / 2.0]
-    x = [x[0] / 2.0 + x[3] / 2.0, x[1] / 2.0 + x[3] / 2.0, x[2]]
     x = np.array(x)
     # print(x)
     if data_unit.uuid in IMAGE_MINMAX_MAP:
@@ -143,31 +168,28 @@ def create_xy(dataset: Dataset, datatype: DataType):
         IMAGE_MINMAX_MAP[data_unit.uuid] = (min_val, max_val)
     if max_val > min_val + np.finfo(float).eps:
         x = (x - min_val) / (max_val - min_val)
-    # x = x / 255.0
+    else:
+        x = x / 255.0
     # print(x)
     x = np.stack(x, axis=2)
-    # print(f"create_training_sample x:{x.shape} y:{data_unit.answers.shape}")
+    # y = data_unit.answers[klass]
+    # print(f"create_training_sample x:{x} y:{y}")
     return x, data_unit.answers
+    # return x, y
 
 
-def create_unit_dataset(data_unit: DataUnit, dir_sr: str):
+def create_unit_dataset(data_unit: DataUnit, dir_str: str):
     x = []
     for color in COLORS:
-        file_path = Path(dir_sr, f"{data_unit.uuid}_{color}.png")
+        file_path = Path(dir_str, f"{data_unit.uuid}_{color}.png")
         img = Image.open(str(file_path))
-        img = img.resize((IMAGE_SIZE // 2, IMAGE_SIZE // 2), Image.LANCZOS)
-        # img = img.resize((299, 299), Image.LANCZOS)
+        # img = img.resize((IMAGE_SIZE, IMAGE_SIZE), Image.LANCZOS)
+        # img = img.resize((IMAGE_SIZE // 2, IMAGE_SIZE // 2), Image.LANCZOS)
+        img = img.resize((192, 192), Image.LANCZOS)
         img.convert('L')
         img = np.array(img)
-        # min_val, max_val = float(img.min()), float(img.max())
-        # if max_val > min_val + np.finfo(float).eps:
-        #     normalized = (img - min_val) / (max_val - min_val)
-        # else:
-        #     normalized = img
         x.append(img)
-
     # merge and normalize
-    x = [x[0] / 2.0 + x[1] / 2.0, x[2] / 2.0 + x[1] / 2.0, x[3] / 2.0 + x[1] / 2.0]
     x = np.array(x)
     if data_unit.uuid in IMAGE_MINMAX_MAP:
         min_val, max_val = IMAGE_MINMAX_MAP[data_unit.uuid]
@@ -176,7 +198,8 @@ def create_unit_dataset(data_unit: DataUnit, dir_sr: str):
         IMAGE_MINMAX_MAP[data_unit.uuid] = (min_val, max_val)
     if max_val > min_val + np.finfo(float).eps:
         x = (x - min_val) / (max_val - min_val)
-    # x = x / 255.0
+    else:
+        x = x / 255.0
     x = np.stack(x, axis=2)
     return x
 

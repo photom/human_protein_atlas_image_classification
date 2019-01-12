@@ -7,16 +7,17 @@ from tensorflow import set_random_seed
 sys.path.append(Path(__file__).parent)
 from model import *
 from dataset import *
+from metrics import *
 
 np.random.seed(19)
 set_random_seed(19)
 
 OUTPUT_FILE = 'test_dataset_prediction.txt'
-# BASE_MODEL = 'resnet50'
+BASE_MODEL = 'resnet50'
 # BASE_MODEL = 'vgg11'
 # BASE_MODEL = 'incepstionresnetv2'
-BASE_MODEL = 'resnet50'
 # BASE_MODEL = 'adams'
+# BASE_MODEL = 'michel'
 if BASE_MODEL == 'resnet50':
     create_model = create_model_resnet50_plain
 elif BASE_MODEL == 'vgg19':
@@ -25,59 +26,52 @@ elif BASE_MODEL == 'incepstionresnetv2':
     create_model = create_model_inceptionresnetv2_plain
 elif BASE_MODEL == 'adams':
     create_model = create_model_adams
+elif BASE_MODEL == 'michel':
+    create_model = create_model_michel
 else:
     raise Exception("unimplemented model")
-
-weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
 
 
 def predict(data_unit: DataUnit, test_model: Model):
     x = create_unit_dataset(data_unit, TEST_DIR)
-    # print(f"x:{x.shape}")
-    # predict
     result = test_model.predict(np.array([x]))
-    # print(result)
+    # print(f"{result}")
     predicted = np.round(result)
+    # result[result >= THRESHOLD] = 0
+    # result[result < THRESHOLD] = 1
+    # predicted = result
+    if not any([1.0 == p for p in predicted[0]]):
+        predicted = np.zeros(28)
+        predicted[np.argmax(result)] = 1.0
+    else:
+        predicted = predicted[0]
+    # print(f"{predicted}")
     return predicted
 
 
 def main():
-    model = create_model(input_shape=(IMAGE_SIZE // 2, IMAGE_SIZE // 2, TRAIN_COLOR_NUM))
-    # model = create_model(input_shape=(299, 299, TRAIN_COLOR_NUM))
+    # test_model = create_model(input_shape=(IMAGE_SIZE, IMAGE_SIZE, len(COLORS)))
+    # test_model = create_model(input_shape=(IMAGE_SIZE // 2, IMAGE_SIZE // 2, len(COLORS)))
+    # test_model = create_model(input_shape=(IMAGE_SIZE // 2, IMAGE_SIZE // 2, TRAIN_COLOR_NUM))
+    test_model = create_model(input_shape=(192, 192, len(COLORS)))
     test_dataset = load_test_data()
-    test_model = build_model(model, weight_param_path)
+    weight_param_path = f"model/{BASE_MODEL}.weights.best.hdf5"
+    test_model.load_weights(weight_param_path)
     content = "Id,Predicted\n"
     for i in range(len(test_dataset.data_list)):
         data_unit = test_dataset.data_list[i]
         predicted = predict(data_unit, test_model)
         decoded = []
-        for idx, result in enumerate(predicted[0]):
+        for idx, result in enumerate(predicted):
             if result == 1:
                 decoded.append(str(idx))
         decoded = " ".join(decoded)
-        print(f"i:{i} decoded:{decoded} {data_unit.uuid},{decoded} ")
+        print(f"i:{i} predicted:{predicted} {decoded} ")
         content += f"{data_unit.uuid},{decoded}\n"
 
     with open(OUTPUT_FILE, 'w') as f:
         f.write(content)
 
 
-# model = create_model(input_shape=(IMAGE_SIZE//2, IMAGE_SIZE//2, TRAIN_COLOR_NUM))
-# test_model = build_model(model, weight_param_path)
-def sample(uuid):
-    # test_model = build_model(weight_param_path, create_model=create_model)
-    traindir = "../hpaic/input/train"
-    data_unit = DataUnit(f"{uuid}", "16 0", traindir)
-    x = create_unit_dataset(data_unit, traindir)
-    # print(f"x:{x.shape}")
-    # predict
-    result = test_model.predict(np.array([x]))
-    print(result)
-    predicted = np.round(result)
-    print(predicted)
-
-
 if __name__ == "__main__":
     main()
-    # sample('00070df0-bbc3-11e8-b2bc-ac1f6b6435d0')  # 16 0
-    # sample('000a6c98-bb9b-11e8-b2b9-ac1f6b6435d0')  # 7 1 2 0

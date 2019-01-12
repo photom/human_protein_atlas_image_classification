@@ -4,41 +4,58 @@ import sys
 import pickle
 import pathlib
 
-from keras.preprocessing.image import ImageDataGenerator
 from keras.models import Model
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 import tensorflow as tf
+import imgaug as ia
+from imgaug import augmenters as iaa
 
 # sys.path.append(pathlib.Path(__file__).parent)
 from dataset import *
 from metrics import *
 
-BATCH_SIZE = 5
-datagen = ImageDataGenerator(featurewise_center=True,
-                             featurewise_std_normalization=True,
-                             zca_whitening=False,  # for memory error
-                             rotation_range=90,
-                             width_shift_range=0.05,
-                             height_shift_range=0.05,
-                             zoom_range=0.1,
-                             brightness_range=[0.8, 1.2],
-                             shear_range=0.10,
-                             horizontal_flip=True,
-                             vertical_flip=True,
-                             fill_mode='constant',
-                             cval=0.0,
-                             # fill_mode='reflect',
-                             )
+
+seq = iaa.Sequential([
+    iaa.OneOf([
+        iaa.Fliplr(0.5),  # horizontal flips
+        iaa.Flipud(0.5),  # vertically flips
+        iaa.Crop(percent=(0, 0.1)),  # random crops
+        # Small gaussian blur with random sigma between 0 and 0.5.
+        # But we only blur about 50% of all images.
+        iaa.Sometimes(0.5,
+                      iaa.GaussianBlur(sigma=(0, 0.5))
+                      ),
+        # Strengthen or weaken the contrast in each image.
+        iaa.ContrastNormalization((0.75, 1.5)),
+        # Add gaussian noise.
+        # For 50% of all images, we sample the noise once per pixel.
+        # For the other 50% of all images, we sample the noise per pixel AND
+        # channel. This can change the color (not only brightness) of the
+        # pixels.
+        iaa.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05*255), per_channel=0.5),
+        # Make some images brighter and some darker.
+        # In 20% of all cases, we sample the multiplier once per channel,
+        # which can end up changing the color of the images.
+        iaa.Multiply((0.8, 1.2), per_channel=0.2),
+        # Apply affine transformations to each image.
+        # Scale/zoom them, translate/move them, rotate them and shear them.
+        iaa.Affine(
+            scale={"x": (0.8, 1.2), "y": (0.8, 1.2)},
+            # translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)},
+            rotate=(-180, 180),
+            shear=(-8, 8)
+        )
+    ])], random_order=True)
 
 
-def create_callbacks(name_weights, patience_lr=10, patience_es=10):
+def create_callbacks(dataset: Dataset, metrics: F1Metrics, name_weights, patience_lr=10, patience_es=150):
     mcp_save = ModelCheckpoint(name_weights, save_weights_only=True,
                                save_best_only=True, monitor='val_loss', mode='min')
     # reduce_lr_loss = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=patience_lr, verbose=1, min_delta=1e-4, mode='min')
     early_stopping = EarlyStopping(monitor='val_loss', patience=patience_es, verbose=1, mode='auto')
     # return [early_stopping, mcp_save, reduce_lr_loss]
     # return [f1metrics, early_stopping, mcp_save]
-    return [early_stopping, mcp_save]
+    return [early_stopping, mcp_save, metrics, dataset]
 
 
 def load_dataset(filename):
@@ -57,39 +74,39 @@ def next_dataset(dataset: Dataset, batch_size: int, datatype: DataType):
         train_dataset_y = []
         for i in range(batch_size):
             x, y = create_xy(dataset, datatype)
-            if datatype != DataType.test:
-                datagen.fit([x])
             train_dataset_x.append(x)
             train_dataset_y.append(y)
-        x_train, y_train = np.array(train_dataset_x), np.array(train_dataset_y)
-        if False:
-        # if datatype != DataType.test:
-            x_batched, y_batched = next(datagen.flow(x_train, y=y_train,
-                                                     # save_to_dir='../hpaic/augment',
-                                                     batch_size=batch_size))
-            # print(f"x_list:{np.array(x_list).shape} y_data:{np.array(train_dataset_y).shape}")
-            yield x_batched, y_batched
+        x, y = np.array(train_dataset_x), np.array(train_dataset_y)
+        # print(f"x_list:{np.array(x).shape} y_data:{np.array(y).shape}")
+        if datatype != DataType.test:
+            do_augment = np.random.randint(10)
+            if do_augment:
+                yield seq.augment_images(x), y
+            else:
+                yield x, y
         else:
-            yield x_train, y_train
+            yield x, y
 
 
-def train_model(model: Model, dataset: Dataset, model_filename: str,
+def train_model(model: Model, metrics: F1Metrics, dataset: Dataset, model_filename: str,
                 batch_size=BATCH_SIZE,
-                num_train_examples=29450 // 8,
-                # num_valid_samples=1550 // 2,
+                num_train_examples=(105678 * TRAIN_RATIO),
+                num_valid_samples=(105678 * VALIDATE_RATIO),
                 # num_train_examples=29450 // 4,
-                num_valid_samples=1550 // 4,
-                epochs=1,):
-    callbacks = create_callbacks(model_filename)
+                # num_valid_samples=1550,
+                epochs=100,):
+    callbacks = create_callbacks(dataset, metrics, model_filename)
     steps_per_epoch = num_train_examples // batch_size
     # steps_per_epoch = 200
-    # epochs = 100
+
+    # print(f"class_weights:{class_weight}")
     validation_steps = num_valid_samples // batch_size
     model.fit_generator(generator=next_dataset(dataset, batch_size, DataType.train),
                         epochs=epochs,
                         validation_data=next_dataset(dataset, batch_size, DataType.validate),
                         steps_per_epoch=steps_per_epoch,
                         validation_steps=validation_steps,
+                        # class_weight=class_weight,
                         callbacks=callbacks, verbose=1)
 
 
@@ -102,7 +119,7 @@ def predict(data_unit: DataUnit, model: Model):
     return predicted
 
 
-def eval_model(model: Model, dataset: Dataset):
+def eval_model(model: Model, dataset: TestDataset):
     sample_num = len(dataset.data_list)
     test_num = int(sample_num * VALIDATE_RATIO)
     test_num = test_num
